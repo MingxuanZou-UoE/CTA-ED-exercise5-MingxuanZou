@@ -362,6 +362,7 @@ topsy_words <- topsy %>%
 topsy_dtm <- topsy_words %>%               #create a new dataset 'topsy_dtm'
   cast_dtm(booknumber, word, n)            #cast data from the topsy_words into a document-term matrix format
 
+
 tm::inspect(topsy_dtm)                    
 #examine the frequency of terms across documents or any other relevant information stored in the matrix.
 ```

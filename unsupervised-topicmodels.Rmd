@@ -402,6 +402,7 @@ topsy_top_terms %>%
   theme_tufte(base_family = "Helvetica")               #sets the theme for the plot
 ```
 
+
 evaluating accuracy
 
 

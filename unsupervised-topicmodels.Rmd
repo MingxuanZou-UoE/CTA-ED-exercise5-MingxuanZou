@@ -376,12 +376,14 @@ Estimating our topic model by LDA
 topsy_lda <- LDA(topsy_dtm, k = 7, control = list(seed = 1234)) #specify 7 topics that we want to search for, and we can also set our seed
 ```
 
+
 extract the per-topic-per-word probabilities
 ```{r}
 topsy_topics <- tidy(topsy_lda, matrix = "beta") #tidied up the beta matrix in the dataset -- to get the topic-term probabilities
 
 head(topsy_topics, n = 10) #display top 10 rows of the dataset
 ```
+
 
 plots the top terms
 ```{r}

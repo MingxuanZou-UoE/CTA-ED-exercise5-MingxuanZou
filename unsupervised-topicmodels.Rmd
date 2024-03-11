@@ -371,41 +371,78 @@ tm::inspect(topsy_dtm)
 
 2. Run your own topic model on these books, changing the k of topics, and evaluating accuracy.
 
-Estimating our topic model by LDA
+##Estimating our topic model by LDA
+
 ```{r}
-topsy_lda <- LDA(topsy_dtm, k = 7, control = list(seed = 1234)) #specify 7 topics that we want to search for, and we can also set our seed
+topsy_lda <- LDA(topsy_dtm, k = 8, control = list(seed = 1234))
+# Specify 8 topics that we want to search for, and we can also set our seed
+# Use the LDA() function to estimate the topic model,where the k parameter specifies the number of topics to search
+
 ```
 
-
-extract the per-topic-per-word probabilities
+##Extract the per-topic-per-word probabilities, called "β" from the model:
 ```{r}
-topsy_topics <- tidy(topsy_lda, matrix = "beta") #tidied up the beta matrix in the dataset -- to get the topic-term probabilities
+topsy_topics <- tidy(topsy_lda, matrix = "beta") 
 
-head(topsy_topics, n = 10) #display top 10 rows of the dataset
+head(topsy_topics, n = 12) #display top 12 rows of the dataset
 ```
 
+##Plots the top terms, in terms of beta, for each topic:
 
-plots the top terms
 ```{r}
-topsy_top_terms <- topsy_topics %>% #create a new dataset named tposy_top_terms
-  group_by(topic) %>%               #group the dataset according to topic
-  top_n(10, beta) %>%               #select the top 10 rows based on the 'beta' 
-  ungroup() %>%                     #remove the grouping structure
-  arrange(topic, -beta)             #arranges the rows first by topic and then by beta in descending order within each topic group
+topsy_top_terms <- topsy_topics %>%
+  group_by(topic) %>%
+  top_n(12, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
 
 topsy_top_terms %>%
-  mutate(term = reorder_within(term, beta, topic)) %>% #create a new variable 'term', which arranges 'term' within each 'topic' group based on the 'beta' column(higher beta, higher position).
-  ggplot(aes(beta, term, fill = factor(topic))) +      #create a ggplot object, where 'beta' is x-axis, 'term' is y-axis, and  each 'topic' represented by different fill colors
-  geom_col(show.legend = FALSE) +                      #specifies that the plot should use columns to represent the data and 'show.legend = FALSE' is used to hide the legend as we alread set the fill color as 'topic'
-  facet_wrap(~ topic, scales = "free", ncol = 4) +     #create multiple plots,each presenting a different topic.
-  scale_y_reordered() +                                #allows for reordered y-axis scales.
-  theme_tufte(base_family = "Helvetica")               #sets the theme for the plot
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free", ncol = 3) +
+  scale_y_reordered() +
+  theme_tufte(base_family = "Helvetica")
+
 ```
 
+##Evaluating topic model
+### Plot relative word frequencies
 
-evaluating accuracy
+```{r}
 
+tidy_topsy <- topsy %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words)
 
+## Count most common words in both
+tidy_topsy %>%
+  count(word, sort = TRUE)
+
+bookfreq <- tidy_topsy %>%
+  mutate(booknumber = ifelse(gutenberg_id==57628, "VOL1", "VOL2")) %>%
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(booknumber, word) %>%
+  group_by(booknumber) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(booknumber, proportion)
+
+ggplot(bookfreq, aes(x = VOL1, y = VOL2, color = abs(VOL1 - VOL2))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme_tufte(base_family = "Helvetica") +
+  theme(legend.position="none", 
+        strip.background = element_blank(), 
+        strip.text.x = element_blank()) +
+  labs(x = "Tocqueville VOL 1", y = "Tocqueville VOL 2") +
+  coord_equal()
+
+```
 
 
 3. Validate different pre-processing techniques using `preText` on the new book(s) of your choice. 

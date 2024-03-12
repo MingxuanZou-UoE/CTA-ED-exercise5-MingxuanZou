@@ -1,0 +1,507 @@
+---
+title: "Exercise 5"
+author: "Mingxuan Zou"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#### 1. Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse) # loads dplyr, ggplot2, and others
+library(stringr) # to handle text elements
+library(tidytext) # includes set of functions useful for manipulating text
+library(topicmodels) # to estimate topic models
+library(gutenbergr) # to get text data
+library(scales)
+library(tm)
+library(ggthemes) # to make your plots look nice
+library(readr)
+library(quanteda)
+library(quanteda.textmodels)
+devtools::install_github("matthewjdenny/preText")
+library(preText)
+```
+
+#### 2. Load data
+
+```{r load data}
+# Download the volumn 1 and 2
+tocq  <- readRDS(gzcon(url("https://github.com/cjbarrie/CTA-ED/blob/main/data/topicmodels/tocq.RDS?raw=true")))
+
+# Reformat the data into document term matrix (dtm) in which col = term and row = doc.
+tocq_words <- tocq %>%
+  # create new cols to identify the term in questions as from volume 1 or volume 2
+  mutate(booknumber = ifelse(gutenberg_id==815, "DiA1", "DiA2")) %>%
+  # tokenization
+  unnest_tokens(word, text) %>%
+  # keep only words
+  filter(!is.na(word)) %>%
+  # sort by count of words in booknumber col
+  count(booknumber, word, sort = TRUE) %>%
+  ungroup() %>%
+  # remove stop words
+  anti_join(stop_words)
+
+# Convert from tidy into dtm
+tocq_dtm <- tocq_words %>%
+  cast_dtm(booknumber, word, n)
+
+tm::inspect(tocq_dtm)
+```
+
+#### 3. Estimate the LDA model
+```{r}
+# Estimate the LDA model
+tocq_lda <- LDA(tocq_dtm, k = 10, control = list(seed = 1234))
+
+# Extract the per-topic-per-word probabilities (β) that given term belongs to a given topic.
+tocq_topics <- tidy(tocq_lda, matrix = "beta")
+
+head(tocq_topics, n = 10)
+```
+
+#### 4. Plot the top terms
+```{r}
+# Identify top terms per topic
+tocq_top_terms <- tocq_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) # sorts the results first by topic and then by beta in descending order (-beta)
+
+# Visualise top terms per topic 
+tocq_top_terms %>%
+  # adjust the order of terms within each topic based on their beta values for better visualization
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  # colour bars by topic
+  ggplot(aes(beta, term, fill = factor(topic))) + 
+  # plot the data as a column chart
+  geom_col(show.legend = FALSE) + 
+  # create a separate plot for each topic, allowing each to have its own y-axis scales. Arrange plots into 4 columns.
+  facet_wrap(~ topic, scales = "free", ncol = 4) + 
+  # ensure y-axis is ordered within each facet according to the reordered terms.
+  scale_y_reordered() +
+  theme_tufte(base_family = "TT Times New Roman")
+```
+#### 5. Evaluating topic model
+##### 5.1. Plot relatively word frequencies
+```{r}
+# Examining characteristics that distinguish volume 1 and volume 2
+
+# Convert the data frame into tidy format
+tidy_tocq <- tocq %>% 
+  unnest_tokens(word, text) %>% 
+  anti_join(stop_words)
+
+# Count most common words in both
+tidy_tocq %>% 
+  count(word, sort = TRUE)
+
+# Calculate the proportions of words in two volumes relative to the whole book
+bookfreq <- tidy_tocq %>% 
+  # create new columns, booknumber = DiA1 if gutenberg_id==815, else booknumber = DiA2
+  mutate(booknumber = ifelse(gutenberg_id==815, 'DiA1', 'DiA2')) %>% 
+  # clean the word column by extracting only the lowercase alphabetical characters
+  mutate(word = str_extract(word, '[a-z]+')) %>% 
+  # group the data by columns and count the number of rows in each group
+  count(booknumber, word) %>% 
+  # group the dataset by the booknumber column
+  group_by(booknumber) %>% 
+  # create a new column that have the proportion of times each word appears relative to the total number of word occurrences in the book
+  mutate(proportion = n / sum(n)) %>% 
+  # remove the 'n' column from the dataset
+  select(-n) %>% 
+  # transform the dataset from long to wide format
+  spread(booknumber, proportion)
+
+# Plot
+ggplot(bookfreq, aes(x = DiA1, y = DiA2, color = abs(DiA1 - DiA2))) + 
+  # reference line 
+  geom_abline(color = 'grey40', lty = 2) + 
+  # plot the data points with a slight random variation in position to  make the distribution of points clearer
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3) + 
+  # add text labels to points, avoid overlapping labels
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) + 
+  # transform x and y axes to a log scale
+  scale_x_log10(labels = percent_format()) + 
+  scale_y_log10(labels = percent_format()) + 
+  # defines a gradient color scale for the points based on the difference between DiA1 and DiA2
+  scale_color_gradient(limits = c(0, 0.001), low = 'darkslategray4', high = 'grey75') + 
+  theme_tufte(base_family = "TT Times New Roman") + 
+  theme(legend.position = 'none',
+        strip.background = element_blank(),
+        strip.text.x = element_blank()) + 
+  labs(x = 'Tocqueville DiA 2', y = 'Tocqueville DiA 1') + 
+  # ensures that x-ais and y-ais have the same unit length
+  coord_equal()
+
+# Overall, more abstract notions of political structure appear with greater frequency in Volume 1, (e.g. 'democratic', 'equality' and 'aristocracy') while Volume 2 seems to contain words specific to America, since 'americans' and 'america' has the greatest frequencies.
+
+
+```
+
+##### 5.2. Split into chapter documents
+```{r}
+# Separate the volumes into chapters
+
+# Filter out missing values
+tocq <- tocq %>% 
+  filter(!is.na(text))
+
+# Divide into docs, each representing one chapter
+tocq_chapter <- tocq %>% 
+  # create new columns, booknumber = DiA1 if gutenberg_id==815, else booknumber = DiA2
+  mutate(booknumber = ifelse(gutenberg_id==815, 'DiA1', 'DiA2')) %>%
+  group_by(booknumber) %>% 
+  # numbers the chapters sequentially within each book
+  mutate(chapter = cumsum(str_detect(text, regex('^chapter', ignore_case = TRUE)))) %>%
+  ungroup() %>% 
+  filter(chapter > 0) %>% 
+  # combines the 'booknumber' and 'chapter' into a single 'document' column
+  unite(document, booknumber, chapter)
+
+# Split into words
+tocq_chapter_word <- tocq_chapter %>% 
+  unnest_tokens(word, text)
+
+# Find doc-word counts
+tocq_word_counts <- tocq_chapter_word %>% 
+  anti_join(stop_words) %>% 
+  count(document, word, sort = TRUE) %>% 
+  ungroup()
+
+tocq_word_counts
+
+# Cast the results into DTM format for LDA analysis
+tocq_chapters_dtm <- tocq_word_counts %>% 
+  cast_dtm(document, word, n)
+
+tm::inspect(tocq_chapters_dtm)
+
+# Re-estimate the topic model with the new DTM, specifying k=2.
+tocq_chapters_lda <- LDA(tocq_chapters_dtm, k = 2, control = list(seed = 1234))
+
+# The per-doc-per-topic probability (γ), or the probability that a given doc (here:chapter) belongs to a particular topic (here:volume)
+# The γ values are therefore the estimated proportion of words within a given chapter allocated to a given volume
+tocq_chapters_gamma <- tidy(tocq_chapters_lda, matrix = 'gamma')
+tocq_chapters_gamma
+```
+
+##### 5.3. Examine consensus
+```{r}
+# Examine topic model based on words contained in each chapter
+
+# Separate the doc name into title and chapter
+tocq_chapters_gamma <- tocq_chapters_gamma %>%
+  separate(document, c('title', 'chapter'), sep = '_', convert = TRUE)
+
+# Identify dominant topic by chapter
+tocq_chapter_classifications <- tocq_chapters_gamma %>% 
+  group_by(title, chapter) %>% 
+  top_n(1, gamma) %>% 
+  ungroup()
+
+# Determine the dominant topic for each book
+tocq_book_topics <- tocq_chapter_classifications %>% 
+  count(title, topic) %>% 
+  group_by(title) %>% 
+  top_n(1,n) %>% 
+  ungroup() %>% 
+  transmute(consensus = title, topic)
+
+# Filter chapters with topics diverging from book's consensus topic
+tocq_chapter_classifications %>% 
+  inner_join(tocq_book_topics, by = 'topic') %>% 
+  filter(title != consensus)
+
+# View doc-word pairs to examine the assignments
+assignments <- augment(tocq_chapters_lda, data = tocq_chapters_dtm)
+assignments
+
+# Prepare and join data for visualisation
+assignments <- assignments %>% 
+  separate(document, c('title', 'chapter'), sep = '_', convert = TRUE) %>% 
+  inner_join(tocq_book_topics, by = c('.topic' = 'topic'))
+
+# visualise word-topic assignments
+assignments %>% 
+  count(title, consensus, wt = count) %>% 
+  group_by(title) %>% 
+  mutate(percent = n / sum(n)) %>% 
+  ggplot(aes(consensus, title, fill = percent)) + 
+  geom_tile() + 
+  scale_fill_gradient2(high = 'red', label = percent_format()) + 
+  geom_text(aes(x = consensus, y = title, label = scales::percent(percent))) + 
+  theme_tufte(base_family = 'TT Times New Roman') + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), 
+        panel.grid = element_blank()) + 
+  labs(x = 'Book words assigned to', 
+       y = 'Book words came from', 
+       fill = '% of assignments')
+```
+#### 6. Validation
+```{r}
+# Assess the impact of different pre-processing choices
+
+# Reformat text into a quateda corpus object
+# load in corpus of Tocequeville text data
+corp <- corpus(tocq, text_field = 'text')
+# use first 10 docs for example
+documents <- corp[sample(1:30000, 1000)]
+# view the doc names
+print(names(documents[1:10]))
+
+# Preprocess in alternative ways
+preprocessed_documents <- factorial_preprocessing(
+  documents, 
+  use_ngrams = TRUE, 
+  infrequent_term_threshold = 0.2, 
+  verbose = FALSE)
+
+# Compare the distance between docs that have been processed in different ways. (Approximately costs 8 mins)
+preText_results <- preText(
+  preprocessed_documents,
+  dataset_name = 'Tocqueville text',
+  distance_method = 'cosine', 
+  num_comparisons = 20,
+  verbose = FALSE)
+
+# Plot the results
+preText_score_plot(preText_results)
+```
+
+#### 7. Exercises
+##### 7.1. Choose another book or set of books from Project Gutenberg
+```{r choose James book, warning=FALSE, message=FALSE}
+topsy <- gutenberg_download(c(57628,57634), meta_fields = "author")
+#download two volumes of a book named "The Principles of Psychology" from Project Gutenberg
+
+topsy_words <- topsy %>%
+  mutate(booknumber = ifelse(gutenberg_id==57628, "VOL1", "VOL2")) %>% #create a new variable named 'booknumber'.If the id is 57628, then assigned it as 'VOL1'. If its id isn't 57628, then assigned it as 'VOL2'
+  unnest_tokens(word, text) %>%            #token the text into single words
+  filter(!is.na(word)) %>%                 #delete the rows without words
+  count(booknumber, word, sort = TRUE) %>% #count the occurence of the combination of 'booknumber' and 'word', and the results are sorted in ascending order
+  ungroup() %>%                            #remove the grouping structure 
+  anti_join(stop_words)                    #remove stop words from the text
+
+
+topsy_dtm <- topsy_words %>%               #create a new dataset 'topsy_dtm'
+  cast_dtm(booknumber, word, n)            #cast data from the topsy_words into a document-term matrix format
+
+
+tm::inspect(topsy_dtm)                    
+#examine the frequency of terms across documents or any other relevant information stored in the matrix.
+```
+
+##### 7.2. Run your own topic model on these books, changing the k of topics, and evaluating accuracy.
+
+###### Estimating our topic model by LDA
+
+```{r}
+topsy_lda <- LDA(topsy_dtm, k = 8, control = list(seed = 1234))
+# Specify 8 topics that we want to search for, and we can also set our seed
+# Use the LDA() function to estimate the topic model,where the k parameter specifies the number of topics to search
+
+```
+
+###### Extract the per-topic-per-word probabilities, called "β" from the model:
+
+```{r}
+topsy_topics <- tidy(topsy_lda, matrix = "beta") 
+head(topsy_topics, n = 12) 
+#display top 12 rows of the dataset
+```
+
+###### Plots the top terms, in terms of beta, for each topic:
+
+```{r}
+topsy_top_terms <- topsy_topics %>%
+  group_by(topic) %>%
+  top_n(12, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+topsy_top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free", ncol = 3) +
+  scale_y_reordered() +
+  theme_tufte(base_family = "Helvetica")
+
+```
+
+###### Evaluating topic model
+
+###### Plot relative word frequencies
+
+```{r}
+
+tidy_topsy <- topsy %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words)
+
+## Count most common words in both
+tidy_topsy %>%
+  count(word, sort = TRUE)
+
+bookfreq <- tidy_topsy %>%
+  mutate(booknumber = ifelse(gutenberg_id==57628, "VOL1", "VOL2")) %>%
+  mutate(word = str_extract(word, "[a-z']+")) %>%
+  count(booknumber, word) %>%
+  group_by(booknumber) %>%
+  mutate(proportion = n / sum(n)) %>% 
+  select(-n) %>% 
+  spread(booknumber, proportion)
+
+ggplot(bookfreq, aes(x = VOL1, y = VOL2, color = abs(VOL1 - VOL2))) +
+  geom_abline(color = "gray40", lty = 2) +
+  geom_jitter(alpha = 0.1, size = 2.5, width = 0.3, height = 0.3) +
+  geom_text(aes(label = word), check_overlap = TRUE, vjust = 1.5) +
+  scale_x_log10(labels = percent_format()) +
+  scale_y_log10(labels = percent_format()) +
+  scale_color_gradient(limits = c(0, 0.001), low = "darkslategray4", high = "gray75") +
+  theme_tufte(base_family = "Helvetica") +
+  theme(legend.position="none", 
+        strip.background = element_blank(), 
+        strip.text.x = element_blank()) +
+  labs(x = "Tocqueville VOL 1", y = "Tocqueville VOL 2") +
+  coord_equal()
+
+```
+
+###### Split into chapter documents
+
+```{r}
+
+topsy <- topsy %>%
+  filter(!is.na(text))
+
+# Divide into documents, each representing one chapter
+topsy_chapter <- topsy %>%
+  mutate(booknumber = ifelse(gutenberg_id==57628, "VOL1", "VOL2")) %>%
+  group_by(booknumber) %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter ", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%
+  unite(document, booknumber, chapter)
+
+# Split into words
+topsy_chapter_word <- topsy_chapter %>%
+  unnest_tokens(word, text)
+
+# Find document-word counts
+topsy_word_counts <- topsy_chapter_word %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+
+topsy_word_counts
+
+# Cast into DTM format for LDA analysis
+
+topsy_chapters_dtm <- topsy_word_counts %>%
+  cast_dtm(document, word, n)
+
+tm::inspect(topsy_chapters_dtm)
+
+#In this step, the text data is reprocessed, transformed into a Document-Term Matrix (DTM) at the chapter level.
+```
+
+###### Re-estimate the topic model with this new DocumentTermMatrix object, specifying k equal to 3. 
+
+```{r}
+topsy_chapters_lda <- LDA(topsy_chapters_dtm, k = 3, control = list(seed = 1234))
+```
+
+###### The gamma values are therefore the estimated proportion of words within a given chapter allocated to a given volume. 
+
+```{r}
+
+topsy_chapters_gamma <- tidy(topsy_chapters_lda, matrix = "gamma")
+topsy_chapters_gamma
+
+```
+
+###### Examine consensus
+
+```{r}
+# First separate the document name into title and chapter
+
+topsy_chapters_gamma <- topsy_chapters_gamma %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)
+
+topsy_chapter_classifications <- topsy_chapters_gamma %>%
+  group_by(title, chapter) %>%
+  top_n(2, gamma) %>%
+  ungroup()
+
+topsy_book_topics <- topsy_chapter_classifications %>%
+  count(title, topic) %>%
+  group_by(title) %>%
+  top_n(2, n) %>%
+  ungroup() %>%
+  transmute(consensus = title, topic)
+
+topsy_chapter_classifications %>%
+  inner_join(topsy_book_topics, by = "topic") %>%
+  filter(title != consensus)
+
+# Look document-word pairs were to see which words in each documents were assigned to a given topic
+
+assignments <- augment(topsy_chapters_lda, data = topsy_chapters_dtm)
+assignments
+
+assignments <- assignments %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE) %>%
+  inner_join(topsy_book_topics, by = c(".topic" = "topic"))
+
+assignments %>%
+  count(title, consensus, wt = count) %>%
+  group_by(title) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(consensus, title, fill = percent)) +
+  geom_tile() +
+  scale_fill_gradient2(high = "red", label = percent_format()) +
+  geom_text(aes(x = consensus, y = title, label = scales::percent(percent))) +
+  theme_tufte(base_family = "Helvetica") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid = element_blank()) +
+  labs(x = "Book words assigned to",
+       y = "Book words came from",
+       fill = "% of assignments")
+
+```
+
+
+##### 7.3. Validate different pre-processing techniques using preText on the new book(s) of your choice.
+```{r validation, warning=FALSE, message=FALSE}
+# Reformat text into a quateda corpus object
+  # load in corpus of James text data
+  corp <- corpus(topsy, text_field = 'text')
+  # use first 10 docs for example
+  documents <- corp[sample(1:30000, 1000)]
+  # view the doc names
+  print(names(documents[1:10]))
+
+# Preprocess in alternative ways
+preprocessed_documents_topsy <- factorial_preprocessing(
+  documents, 
+  use_ngrams = TRUE, # specify that n-grams should be preprocessed in addition to words and tokens
+  infrequent_term_threshold = 0.2, # remove the terms that appear in fewer than 20% of the doc.
+  verbose = FALSE) # 'verbose' mode prints out detailed progress or diagnostic messages. Silent operation by setting it to FALSE.
+  
+# Compare the distance between docs that have been processed in different ways. (Approximately 400s)
+preText_results_topsy <- preText(
+  preprocessed_documents_topsy,
+  dataset_name = 'James text', # name the input dataset
+  distance_method = 'cosine', # measure the cosine of angle between two vectors. Lower cos indicates higher similarity.
+  num_comparisons = 20, # 20 pairs of preprocessed doc to be compared.
+  verbose = FALSE) # likewise, for silent operation.
+
+# Plot the results
+preText_score_plot(preText_results_topsy)
+```
+

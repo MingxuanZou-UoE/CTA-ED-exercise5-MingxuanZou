@@ -383,8 +383,8 @@ topsy_lda <- LDA(topsy_dtm, k = 8, control = list(seed = 1234))
 ##Extract the per-topic-per-word probabilities, called "β" from the model:
 ```{r}
 topsy_topics <- tidy(topsy_lda, matrix = "beta") 
-
-head(topsy_topics, n = 12) #display top 12 rows of the dataset
+head(topsy_topics, n = 12) 
+#display top 12 rows of the dataset
 ```
 
 ##Plots the top terms, in terms of beta, for each topic:
@@ -441,6 +441,107 @@ ggplot(bookfreq, aes(x = VOL1, y = VOL2, color = abs(VOL1 - VOL2))) +
         strip.text.x = element_blank()) +
   labs(x = "Tocqueville VOL 1", y = "Tocqueville VOL 2") +
   coord_equal()
+
+```
+
+### Split into chapter documents
+```{r}
+
+topsy <- topsy %>%
+  filter(!is.na(text))
+
+# Divide into documents, each representing one chapter
+topsy_chapter <- topsy %>%
+  mutate(booknumber = ifelse(gutenberg_id==57628, "VOL1", "VOL2")) %>%
+  group_by(booknumber) %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter ", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%
+  unite(document, booknumber, chapter)
+
+# Split into words
+topsy_chapter_word <- topsy_chapter %>%
+  unnest_tokens(word, text)
+
+# Find document-word counts
+topsy_word_counts <- topsy_chapter_word %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+
+topsy_word_counts
+
+# Cast into DTM format for LDA analysis
+
+topsy_chapters_dtm <- topsy_word_counts %>%
+  cast_dtm(document, word, n)
+
+tm::inspect(topsy_chapters_dtm)
+
+#In this step, the text data is reprocessed, transformed into a Document-Term Matrix (DTM) at the chapter level.
+```
+##Re-estimate the topic model with this new DocumentTermMatrix object, specifying k equal to 3. 
+
+```{r}
+topsy_chapters_lda <- LDA(topsy_chapters_dtm, k = 3, control = list(seed = 1234))
+```
+
+##The gamma values are therefore the estimated proportion of words within a given chapter allocated to a given volume. 
+
+```{r}
+
+topsy_chapters_gamma <- tidy(topsy_chapters_lda, matrix = "gamma")
+topsy_chapters_gamma
+
+```
+
+### Examine consensus
+```{r}
+# First separate the document name into title and chapter
+
+topsy_chapters_gamma <- topsy_chapters_gamma %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)
+
+topsy_chapter_classifications <- topsy_chapters_gamma %>%
+  group_by(title, chapter) %>%
+  top_n(2, gamma) %>%
+  ungroup()
+
+topsy_book_topics <- topsy_chapter_classifications %>%
+  count(title, topic) %>%
+  group_by(title) %>%
+  top_n(2, n) %>%
+  ungroup() %>%
+  transmute(consensus = title, topic)
+
+topsy_chapter_classifications %>%
+  inner_join(topsy_book_topics, by = "topic") %>%
+  filter(title != consensus)
+
+# Look document-word pairs were to see which words in each documents were assigned
+# to a given topic
+
+assignments <- augment(topsy_chapters_lda, data = topsy_chapters_dtm)
+assignments
+
+assignments <- assignments %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE) %>%
+  inner_join(topsy_book_topics, by = c(".topic" = "topic"))
+
+assignments %>%
+  count(title, consensus, wt = count) %>%
+  group_by(title) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(consensus, title, fill = percent)) +
+  geom_tile() +
+  scale_fill_gradient2(high = "red", label = percent_format()) +
+  geom_text(aes(x = consensus, y = title, label = scales::percent(percent))) +
+  theme_tufte(base_family = "Helvetica") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid = element_blank()) +
+  labs(x = "Book words assigned to",
+       y = "Book words came from",
+       fill = "% of assignments")
 
 ```
 
